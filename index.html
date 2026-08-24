@@ -1,0 +1,586 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Calibración · Acrosom.ai</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="config.js"></script>
+<style>
+  :root{
+    --bg: #0a0f1a;
+    --panel: #111a2b;
+    --panel-2: #0d1522;
+    --line: #1f2c42;
+    --text: #e7ecf5;
+    --muted: #7c8aa3;
+    --cyan: #4fd8e8;
+    --yellow: #f3c548;
+    --green: #3fdc9a;
+    --red: #e35d5d;
+    --radius: 10px;
+  }
+  *{ box-sizing: border-box; }
+  html,body{ margin:0; padding:0; }
+  body{
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Inter', sans-serif;
+    min-height: 100vh;
+  }
+  ::selection{ background: var(--cyan); color:#00131a; }
+
+  .scanline{
+    position: fixed; inset:0; pointer-events:none; z-index: 50;
+    background: repeating-linear-gradient(
+      to bottom, rgba(255,255,255,0.012) 0px, rgba(255,255,255,0.012) 1px,
+      transparent 1px, transparent 3px
+    );
+    mix-blend-mode: overlay;
+  }
+
+  header{
+    padding: 22px 28px;
+    border-bottom: 1px solid var(--line);
+    display:flex; align-items:baseline; justify-content:space-between;
+    flex-wrap: wrap; gap: 8px;
+  }
+  header .title{
+    font-family:'IBM Plex Mono', monospace;
+    font-size: 15px; letter-spacing: 0.02em;
+    color: var(--muted);
+    display:flex; align-items:center; gap:10px;
+  }
+  header .title b{ color: var(--text); font-weight:600; }
+  .pulse-dot{
+    width:7px; height:7px; border-radius:50%; background: var(--green);
+    box-shadow: 0 0 0 0 rgba(63,220,154,0.6);
+    animation: pulse 2s infinite;
+  }
+  @keyframes pulse{
+    0%{ box-shadow: 0 0 0 0 rgba(63,220,154,0.5);}
+    70%{ box-shadow: 0 0 0 8px rgba(63,220,154,0);}
+    100%{ box-shadow: 0 0 0 0 rgba(63,220,154,0);}
+  }
+  header .sub{ font-size:12.5px; color: var(--muted); font-family:'IBM Plex Mono', monospace; }
+
+  main{
+    max-width: 1180px; margin: 0 auto; padding: 28px;
+    display:grid; grid-template-columns: 1.15fr 0.85fr; gap: 22px;
+  }
+  @media (max-width: 920px){ main{ grid-template-columns: 1fr; } }
+
+  .panel{
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 20px;
+  }
+  .panel h2{
+    font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em;
+    color: var(--muted); margin: 0 0 16px 0; font-weight:600;
+    display:flex; align-items:center; gap:8px;
+  }
+  .panel h2 .n{ color: var(--cyan); font-family:'IBM Plex Mono', monospace; }
+
+  /* --- Canvas / drop zone --- */
+  .dropzone{
+    border: 1.5px dashed var(--line);
+    border-radius: var(--radius);
+    min-height: 200px;
+    display:flex; align-items:center; justify-content:center;
+    color: var(--muted); font-size: 13.5px;
+    cursor: pointer; transition: border-color .15s, background .15s;
+    position: relative;
+    overflow:hidden;
+  }
+  .dropzone:hover{ border-color: var(--cyan); background: rgba(79,216,232,0.04); }
+  .dropzone.has-image{ border-style: solid; cursor: default; }
+  .dropzone input{ display:none; }
+  #canvasWrap{ position:relative; width:100%; line-height:0; }
+  #imgCanvas{ width:100%; display:block; border-radius: var(--radius); cursor: crosshair; }
+
+  .hint-badge{
+    position:absolute; top:8px; left:8px;
+    background: rgba(10,15,26,0.85);
+    border:1px solid var(--line);
+    color: var(--muted);
+    font-family:'IBM Plex Mono', monospace;
+    font-size: 11px; padding: 4px 8px; border-radius: 6px;
+    pointer-events:none;
+  }
+
+  .points-status{
+    display:flex; gap:14px; margin-top:12px; font-family:'IBM Plex Mono', monospace; font-size: 12.5px;
+  }
+  .points-status span{ display:flex; align-items:center; gap:6px; color:var(--muted); }
+  .swatch{ width:9px; height:9px; border-radius:50%; display:inline-block; }
+  .swatch.y{ background: var(--yellow); }
+  .swatch.g{ background: var(--green); }
+  .points-status .val{ color: var(--text); }
+
+  .reset-link{
+    background:none; border:none; color: var(--muted); font-size:12px;
+    font-family:'IBM Plex Mono', monospace; text-decoration: underline;
+    cursor:pointer; padding:0; margin-left:auto;
+  }
+  .reset-link:hover{ color: var(--red); }
+
+  /* --- Form --- */
+  .field{ margin-bottom: 14px; }
+  .field label{
+    display:block; font-size: 12px; color: var(--muted); margin-bottom: 6px;
+    font-weight:500;
+  }
+  .field input, .field select, .field textarea{
+    width:100%; background: var(--panel-2); border: 1px solid var(--line);
+    color: var(--text); padding: 9px 11px; border-radius: 7px;
+    font-family: 'Inter', sans-serif; font-size: 13.5px;
+    outline: none; transition: border-color .15s;
+  }
+  .field input:focus, .field select:focus, .field textarea:focus{ border-color: var(--cyan); }
+  .field .mono{ font-family:'IBM Plex Mono', monospace; }
+  .row2{ display:grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+
+  .readout{
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 14px 16px;
+    margin: 4px 0 18px 0;
+    font-family:'IBM Plex Mono', monospace;
+  }
+  .readout .label{ font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:0.06em; }
+  .readout .value{ font-size: 24px; color: var(--cyan); font-weight:600; margin-top:4px; }
+  .readout .value.dim{ color: var(--muted); font-size:15px; font-weight:400;}
+
+  button.primary{
+    width:100%; padding: 11px; border-radius: 8px; border:none;
+    background: var(--cyan); color: #00131a; font-weight:700; font-size: 13.5px;
+    cursor:pointer; transition: transform .1s, opacity .15s;
+    font-family:'Inter', sans-serif;
+  }
+  button.primary:hover{ opacity:0.9; }
+  button.primary:active{ transform: scale(0.99); }
+  button.primary:disabled{ background: var(--line); color: var(--muted); cursor:not-allowed; }
+
+  .divider{ height:1px; background: var(--line); margin: 18px 0; }
+
+  /* --- Profiles table --- */
+  .search-input{
+    width:100%; background: var(--panel-2); border:1px solid var(--line);
+    color: var(--text); padding: 9px 11px; border-radius:7px; margin-bottom:12px;
+    font-size:13.5px; outline:none;
+  }
+  .search-input:focus{ border-color: var(--cyan); }
+  table{ width:100%; border-collapse: collapse; font-size: 12.8px; }
+  th{
+    text-align:left; color: var(--muted); font-weight:500; font-size:11px;
+    text-transform:uppercase; letter-spacing:0.04em; padding: 6px 8px;
+    border-bottom: 1px solid var(--line);
+  }
+  td{ padding: 9px 8px; border-bottom: 1px solid var(--line); font-family:'IBM Plex Mono', monospace; }
+  tr.profile-row{ cursor:pointer; transition: background .1s; }
+  tr.profile-row:hover{ background: rgba(79,216,232,0.06); }
+  td.scale-cell{ color: var(--cyan); font-weight:600; }
+  .empty-row td{ color: var(--muted); font-family:'Inter',sans-serif; text-align:center; padding: 24px 8px; }
+  .method-tag{
+    font-size:10px; padding:2px 6px; border-radius:4px; font-family:'IBM Plex Mono', monospace;
+  }
+  .method-tag.manual{ background: rgba(243,197,72,0.14); color: var(--yellow); }
+  .method-tag.dicom{ background: rgba(63,220,154,0.14); color: var(--green); }
+  .method-tag.auto_detectado{ background: rgba(79,216,232,0.14); color: var(--cyan); }
+
+  .toast{
+    position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%);
+    background: var(--panel); border:1px solid var(--green); color: var(--text);
+    padding: 12px 18px; border-radius: 8px; font-size: 13px;
+    font-family:'IBM Plex Mono', monospace;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+    opacity:0; pointer-events:none; transition: opacity .2s, transform .2s;
+    z-index: 100;
+  }
+  .toast.show{ opacity:1; transform: translateX(-50%) translateY(-4px); }
+  .toast.error{ border-color: var(--red); }
+
+  footer{
+    text-align:center; color: var(--muted); font-size: 11.5px;
+    font-family:'IBM Plex Mono', monospace; padding: 30px 20px 40px;
+  }
+</style>
+</head>
+<body>
+<div class="scanline"></div>
+
+<header>
+  <div class="title">
+    <span class="pulse-dot"></span>
+    <span><b>Calibración</b> · Acrosom.ai</span>
+  </div>
+  <div class="sub">px → mm · perfiles por equipo</div>
+</header>
+
+<main>
+  <!-- LEFT: Nueva calibración -->
+  <section class="panel">
+    <h2><span class="n">01</span> Nueva calibración</h2>
+
+    <div class="dropzone" id="dropzone">
+      <input type="file" id="fileInput" accept="image/*" />
+      <span id="dropzoneLabel">Arrastra o haz clic para subir la imagen del ecógrafo</span>
+      <div id="canvasWrap" style="display:none;">
+        <div class="hint-badge" id="hintBadge">marca 2 puntos sobre una referencia conocida</div>
+        <canvas id="imgCanvas"></canvas>
+      </div>
+    </div>
+
+    <div class="points-status">
+      <span><span class="swatch y"></span> P1: <span class="val" id="p1Val">—</span></span>
+      <span><span class="swatch g"></span> P2: <span class="val" id="p2Val">—</span></span>
+      <span class="val" id="distPxVal" style="margin-left:auto; margin-right:0;"></span>
+      <button class="reset-link" id="resetPoints">reiniciar puntos</button>
+    </div>
+
+    <div class="divider"></div>
+
+    <div class="field">
+      <label for="distMm">Distancia real conocida (mm)</label>
+      <input type="number" step="0.01" id="distMm" class="mono" placeholder="ej. 10.0 (si marcaste 1 cm de la regla)" />
+    </div>
+
+    <div class="readout">
+      <div class="label">Escala calculada</div>
+      <div class="value" id="scaleReadout">— mm/px</div>
+      <div class="value dim" id="scaleReadoutPx">—</div>
+    </div>
+
+    <div class="row2">
+      <div class="field">
+        <label for="marca">Marca</label>
+        <input type="text" id="marca" placeholder="ej. Mindray" />
+      </div>
+      <div class="field">
+        <label for="modelo">Modelo</label>
+        <input type="text" id="modelo" placeholder="ej. DC-N3" />
+      </div>
+    </div>
+    <div class="row2">
+      <div class="field">
+        <label for="transductor">Transductor (opcional)</label>
+        <input type="text" id="transductor" placeholder="ej. 6V1" />
+      </div>
+      <div class="field">
+        <label for="profundidad">Profundidad — "D" en pantalla (cm)</label>
+        <input type="number" step="0.1" id="profundidad" class="mono" placeholder="ej. 6.0" />
+      </div>
+    </div>
+    <div class="field">
+      <label for="notas">Notas (opcional)</label>
+      <textarea id="notas" rows="2" placeholder="ej. calibrado con regla lateral, validado contra caliper"></textarea>
+    </div>
+
+    <button class="primary" id="saveBtn" disabled>Guardar perfil</button>
+  </section>
+
+  <!-- RIGHT: Perfiles guardados -->
+  <section class="panel">
+    <h2><span class="n">02</span> Perfiles guardados</h2>
+    <input type="text" class="search-input" id="searchInput" placeholder="Buscar por marca, modelo o transductor…" />
+    <table>
+      <thead>
+        <tr>
+          <th>Equipo</th>
+          <th>D (cm)</th>
+          <th>Escala</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="profilesBody">
+        <tr class="empty-row"><td colspan="4">Cargando perfiles…</td></tr>
+      </tbody>
+    </table>
+  </section>
+</main>
+
+<footer>acrosom.ai · herramienta interna de calibración</footer>
+
+<div class="toast" id="toast"></div>
+
+<script>
+  const supa = window.SUPABASE_URL && window.SUPABASE_URL.includes('TU-PROYECTO')
+    ? null
+    : window.supabase.createClient(window.SUPABASE_URL, window.SUPABASE_ANON_KEY);
+
+  const TABLE = 'calibration_profiles';
+
+  // ---------- Toast ----------
+  function showToast(msg, isError=false){
+    const t = document.getElementById('toast');
+    t.textContent = msg;
+    t.className = 'toast show' + (isError ? ' error' : '');
+    setTimeout(()=>{ t.className = 'toast'; }, 3200);
+  }
+
+  // ---------- Canvas / calibration points ----------
+  const dropzone = document.getElementById('dropzone');
+  const fileInput = document.getElementById('fileInput');
+  const canvasWrap = document.getElementById('canvasWrap');
+  const dropzoneLabel = document.getElementById('dropzoneLabel');
+  const canvas = document.getElementById('imgCanvas');
+  const ctx = canvas.getContext('2d');
+  const hintBadge = document.getElementById('hintBadge');
+
+  let img = new Image();
+  let naturalW = 0, naturalH = 0;
+  let points = []; // up to 2, in natural image coords
+
+  dropzone.addEventListener('click', (e)=>{
+    if (canvasWrap.style.display === 'none') fileInput.click();
+  });
+  fileInput.addEventListener('change', (e)=>{
+    const f = e.target.files[0];
+    if (f) loadImage(f);
+  });
+  ['dragover','drop'].forEach(evt=>{
+    dropzone.addEventListener(evt, (e)=>{ e.preventDefault(); });
+  });
+  dropzone.addEventListener('drop', (e)=>{
+    const f = e.dataTransfer.files[0];
+    if (f) loadImage(f);
+  });
+
+  function loadImage(file){
+    const reader = new FileReader();
+    reader.onload = (e)=>{
+      img = new Image();
+      img.onload = ()=>{
+        naturalW = img.naturalWidth;
+        naturalH = img.naturalHeight;
+        canvas.width = naturalW;
+        canvas.height = naturalH;
+        dropzoneLabel.style.display = 'none';
+        canvasWrap.style.display = 'block';
+        dropzone.classList.add('has-image');
+        points = [];
+        drawScene();
+        updatePointsStatus();
+      };
+      img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+  }
+
+  canvas.addEventListener('click', (e)=>{
+    if (!naturalW) return;
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = naturalW / rect.width;
+    const scaleY = naturalH / rect.height;
+    const x = (e.clientX - rect.left) * scaleX;
+    const y = (e.clientY - rect.top) * scaleY;
+
+    if (points.length >= 2) points = [];
+    points.push({x,y});
+    drawScene();
+    updatePointsStatus();
+    updateScaleReadout();
+  });
+
+  function drawScene(){
+    ctx.clearRect(0,0,canvas.width, canvas.height);
+    ctx.drawImage(img, 0, 0, naturalW, naturalH);
+
+    if (points.length >= 1) drawCross(points[0], '#f3c548');
+    if (points.length >= 2){
+      drawCross(points[1], '#3fdc9a');
+      drawDottedLine(points[0], points[1]);
+    }
+  }
+
+  function drawCross(p, color){
+    const s = Math.max(naturalW, naturalH) * 0.012;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = Math.max(2, naturalW*0.0015);
+    ctx.beginPath();
+    ctx.moveTo(p.x - s, p.y); ctx.lineTo(p.x + s, p.y);
+    ctx.moveTo(p.x, p.y - s); ctx.lineTo(p.x, p.y + s);
+    ctx.stroke();
+  }
+
+  function drawDottedLine(p1, p2){
+    ctx.save();
+    ctx.strokeStyle = '#4fd8e8';
+    ctx.lineWidth = Math.max(1.5, naturalW*0.001);
+    ctx.setLineDash([naturalW*0.006, naturalW*0.006]);
+    ctx.beginPath();
+    ctx.moveTo(p1.x, p1.y);
+    ctx.lineTo(p2.x, p2.y);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function updatePointsStatus(){
+    document.getElementById('p1Val').textContent = points[0] ? `${Math.round(points[0].x)}, ${Math.round(points[0].y)}` : '—';
+    document.getElementById('p2Val').textContent = points[1] ? `${Math.round(points[1].x)}, ${Math.round(points[1].y)}` : '—';
+    const distEl = document.getElementById('distPxVal');
+    if (points.length === 2){
+      const d = pxDistance();
+      distEl.textContent = `${d.toFixed(1)} px`;
+      hintBadge.textContent = 'clic de nuevo para reiniciar los puntos';
+    } else {
+      distEl.textContent = '';
+      hintBadge.textContent = points.length === 1
+        ? 'marca el segundo punto'
+        : 'marca 2 puntos sobre una referencia conocida';
+    }
+  }
+
+  function pxDistance(){
+    if (points.length < 2) return 0;
+    return Math.hypot(points[1].x - points[0].x, points[1].y - points[0].y);
+  }
+
+  document.getElementById('resetPoints').addEventListener('click', ()=>{
+    points = [];
+    if (naturalW) drawScene();
+    updatePointsStatus();
+    updateScaleReadout();
+  });
+
+  // ---------- Scale calculation ----------
+  const distMmInput = document.getElementById('distMm');
+  const scaleReadout = document.getElementById('scaleReadout');
+  const scaleReadoutPx = document.getElementById('scaleReadoutPx');
+  const saveBtn = document.getElementById('saveBtn');
+
+  distMmInput.addEventListener('input', updateScaleReadout);
+
+  let currentScaleMmPx = null;
+
+  function updateScaleReadout(){
+    const distPx = pxDistance();
+    const distMm = parseFloat(distMmInput.value);
+    if (distPx > 0 && distMm > 0){
+      currentScaleMmPx = distMm / distPx;
+      scaleReadout.textContent = `${currentScaleMmPx.toFixed(4)} mm/px`;
+      scaleReadoutPx.textContent = `≈ ${(1/currentScaleMmPx).toFixed(2)} px/mm`;
+      saveBtn.disabled = false;
+    } else {
+      currentScaleMmPx = null;
+      scaleReadout.textContent = '— mm/px';
+      scaleReadoutPx.textContent = '—';
+      saveBtn.disabled = true;
+    }
+  }
+
+  // ---------- Save profile ----------
+  saveBtn.addEventListener('click', async ()=>{
+    const marca = document.getElementById('marca').value.trim();
+    const modelo = document.getElementById('modelo').value.trim();
+    const transductor = document.getElementById('transductor').value.trim();
+    const profundidad_cm = parseFloat(document.getElementById('profundidad').value);
+    const notas = document.getElementById('notas').value.trim();
+
+    if (!marca || !modelo || !profundidad_cm || !currentScaleMmPx){
+      showToast('Falta marca, modelo, profundidad o los 2 puntos de calibración', true);
+      return;
+    }
+    if (!supa){
+      showToast('Falta configurar Supabase en config.js', true);
+      return;
+    }
+
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Guardando…';
+
+    const { error } = await supa.from(TABLE).upsert({
+      marca, modelo, transductor, profundidad_cm,
+      escala_mm_px: currentScaleMmPx,
+      metodo: 'manual',
+      notas: notas || null,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: 'marca,modelo,transductor,profundidad_cm' });
+
+    saveBtn.textContent = 'Guardar perfil';
+    saveBtn.disabled = false;
+
+    if (error){
+      showToast('Error al guardar: ' + error.message, true);
+    } else {
+      showToast('Perfil guardado ✓');
+      loadProfiles();
+    }
+  });
+
+  // ---------- Profiles list ----------
+  let allProfiles = [];
+
+  async function loadProfiles(){
+    const body = document.getElementById('profilesBody');
+    if (!supa){
+      body.innerHTML = `<tr class="empty-row"><td colspan="4">Configura Supabase en config.js para ver los perfiles</td></tr>`;
+      return;
+    }
+    const { data, error } = await supa
+      .from(TABLE)
+      .select('*')
+      .order('updated_at', { ascending: false });
+
+    if (error){
+      body.innerHTML = `<tr class="empty-row"><td colspan="4">Error cargando perfiles</td></tr>`;
+      return;
+    }
+    allProfiles = data || [];
+    renderProfiles(allProfiles);
+  }
+
+  function renderProfiles(list){
+    const body = document.getElementById('profilesBody');
+    if (!list.length){
+      body.innerHTML = `<tr class="empty-row"><td colspan="4">Sin perfiles todavía — calibra el primero a la izquierda</td></tr>`;
+      return;
+    }
+    body.innerHTML = list.map(p => `
+      <tr class="profile-row" data-scale="${p.escala_mm_px}">
+        <td>
+          <div style="color:var(--text); font-family:Inter,sans-serif; font-weight:500;">${escapeHtml(p.marca)} ${escapeHtml(p.modelo)}</div>
+          <div style="color:var(--muted); font-size:11px;">${escapeHtml(p.transductor || '—')} · <span class="method-tag ${p.metodo}">${p.metodo}</span></div>
+        </td>
+        <td>${p.profundidad_cm}</td>
+        <td class="scale-cell">${Number(p.escala_mm_px).toFixed(4)}</td>
+        <td style="color:var(--muted); font-size:11px;">clic para copiar</td>
+      </tr>
+    `).join('');
+
+    body.querySelectorAll('.profile-row').forEach(row=>{
+      row.addEventListener('click', ()=>{
+        const scale = row.getAttribute('data-scale');
+        navigator.clipboard.writeText(scale).then(()=>{
+          showToast(`Copiado: ${Number(scale).toFixed(4)} mm/px`);
+        }).catch(()=>{
+          showToast(`Escala: ${Number(scale).toFixed(4)} mm/px`);
+        });
+      });
+    });
+  }
+
+  function escapeHtml(str){
+    if (!str) return '';
+    return str.replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+  }
+
+  document.getElementById('searchInput').addEventListener('input', (e)=>{
+    const q = e.target.value.toLowerCase();
+    const filtered = allProfiles.filter(p =>
+      (p.marca||'').toLowerCase().includes(q) ||
+      (p.modelo||'').toLowerCase().includes(q) ||
+      (p.transductor||'').toLowerCase().includes(q)
+    );
+    renderProfiles(filtered);
+  });
+
+  loadProfiles();
+</script>
+</body>
+</html>
