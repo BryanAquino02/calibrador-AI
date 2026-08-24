@@ -588,9 +588,7 @@
     renderProfiles(filtered);
   });
 
-  // ---------- Detección automática (puerto de auto_calibrate.py a JS) ----------
-  // Mismo layout genérico que usa la versión Python: la regla de
-  // profundidad suele caer en esta franja relativa del ancho de imagen.
+  // ---------- Detección automática (puerto completo de auto_calibrate.py a JS) ----------
   const RULER_X_FRAC = [0.158, 0.194];
   const BRIGHTNESS_THRESH = 150;
 
@@ -619,7 +617,6 @@
     }
     if (tickRows.length < 4) return null;
 
-    // agrupa filas consecutivas en clusters, igual que la versión Python
     const rawClusters = [];
     let cur = [tickRows[0]];
     for (let i = 1; i < tickRows.length; i++){
@@ -632,8 +629,6 @@
     }
     rawClusters.push(cur);
 
-    // se queda solo con clusters del tamaño "típico" (descarta el glifo
-    // de texto de la etiqueta "5", que tiene otro grosor)
     const sizes = rawClusters.map(c => c.length);
     const sizeCounts = {};
     sizes.forEach(s => sizeCounts[s] = (sizeCounts[s]||0)+1);
@@ -655,12 +650,118 @@
     if (goodDiffs.length < 2) return null;
 
     const pxPerCm = goodDiffs.reduce((a,b)=>a+b,0) / goodDiffs.length;
-    return 10.0 / pxPerCm; // mm/px
+    return 10.0 / pxPerCm;
+  }
+
+  // --- Detección de cruces de caliper (puerto de _find_comps + _merge_clusters) ---
+
+  // Componentes conexos (4-vecinos, igual que scipy.ndimage.label por defecto)
+  // sobre una máscara booleana. Como las cruces son manchas chiquitas, un
+  // flood-fill iterativo es más que suficiente en velocidad.
+  function findComponents(mask, w, h){
+    const visited = new Uint8Array(w*h);
+    const comps = [];
+    for (let y = 0; y < h; y++){
+      for (let x = 0; x < w; x++){
+        const idx = y*w + x;
+        if (!mask[idx] || visited[idx]) continue;
+
+        let sumX = 0, sumY = 0, count = 0;
+        const stack = [idx];
+        visited[idx] = 1;
+        while (stack.length){
+          const cur = stack.pop();
+          const cy = Math.floor(cur / w), cx = cur % w;
+          sumX += cx; sumY += cy; count++;
+          const neighbors = [
+            [cx-1,cy],[cx+1,cy],[cx,cy-1],[cx,cy+1]
+          ];
+          for (const [nx,ny] of neighbors){
+            if (nx<0||nx>=w||ny<0||ny>=h) continue;
+            const nidx = ny*w+nx;
+            if (mask[nidx] && !visited[nidx]){
+              visited[nidx] = 1;
+              stack.push(nidx);
+            }
+          }
+        }
+        comps.push({size: count, x: sumX/count, y: sumY/count});
+      }
+    }
+    return comps;
+  }
+
+  function mergeClusters(comps, distThresh=15){
+    const clusters = [];
+    for (const {size, x, y} of comps){
+      let placed = false;
+      for (const c of clusters){
+        const totS = c.reduce((a,p)=>a+p.size,0);
+        const cx = c.reduce((a,p)=>a+p.size*p.x,0)/totS;
+        const cy = c.reduce((a,p)=>a+p.size*p.y,0)/totS;
+        if (Math.hypot(x-cx, y-cy) < distThresh){
+          c.push({size,x,y});
+          placed = true;
+          break;
+        }
+      }
+      if (!placed) clusters.push([{size,x,y}]);
+    }
+    const result = clusters.map(c => {
+      const tot = c.reduce((a,p)=>a+p.size,0);
+      const cx = c.reduce((a,p)=>a+p.size*p.x,0)/tot;
+      const cy = c.reduce((a,p)=>a+p.size*p.y,0)/tot;
+      return {size: tot, x: cx, y: cy};
+    });
+    result.sort((a,b) => b.size - a.size);
+    return result;
+  }
+
+  function detectCaliperDistancePx(){
+    if (!naturalW) return null;
+    const imgData = ctx.getImageData(0, 0, naturalW, naturalH).data;
+    const yellowMask = new Uint8Array(naturalW*naturalH);
+    const greenMask = new Uint8Array(naturalW*naturalH);
+
+    for (let i = 0; i < naturalW*naturalH; i++){
+      const r = imgData[i*4], g = imgData[i*4+1], b = imgData[i*4+2];
+      if (r>180 && g>180 && b<120) yellowMask[i] = 1;
+      if (g>180 && r<150 && b<150 && (g-r)>60 && (g-b)>60) greenMask[i] = 1;
+    }
+
+    const comps = [
+      ...findComponents(yellowMask, naturalW, naturalH),
+      ...findComponents(greenMask, naturalW, naturalH),
+    ];
+    const clusters = mergeClusters(comps);
+    const top2 = clusters.filter(c => c.size >= 8).slice(0, 2);
+    if (top2.length < 2) return null;
+
+    return Math.hypot(top2[0].x - top2[1].x, top2[0].y - top2[1].y);
+  }
+
+  async function ocrReadMeasurements(){
+    const cw = Math.floor(naturalW*0.17), ch = Math.floor(naturalH*0.30);
+    const c = document.createElement('canvas');
+    c.width = cw*3; c.height = ch*3;
+    const cctx = c.getContext('2d');
+    cctx.imageSmoothingEnabled = false;
+    cctx.drawImage(canvas, naturalW*0.83, 0, cw, ch, 0, 0, cw*3, ch*3);
+
+    const worker = await Tesseract.createWorker('eng');
+    const { data: { text } } = await worker.recognize(c, { tessedit_pageseg_mode: '6' });
+    await worker.terminate();
+
+    const mediciones = [];
+    const regex = /(\d+)\s*D:\s*([\d.]+)\s*mm/g;
+    let m;
+    while ((m = regex.exec(text)) !== null){
+      mediciones.push([parseInt(m[1]), parseFloat(m[2])]);
+    }
+    return mediciones;
   }
 
   async function ocrMetadata(){
-    // recorta el panel técnico (profundidad "D") y el header (transductor)
-    // y les corre OCR -- mismas regiones relativas que la versión Python
     const cropCanvas = (fx0, fy0, fx1, fy1, scale=3) => {
       const cw = Math.floor((fx1-fx0)*naturalW), ch = Math.floor((fy1-fy0)*naturalH);
       const c = document.createElement('canvas');
@@ -689,31 +790,73 @@
     return meta;
   }
 
+  // --- Combina regla + caliper+OCR, igual que auto_calibrate() en Python ---
+  async function autoCalibrate(){
+    const escalaRegla = detectRulerScale();
+    const distPx = detectCaliperDistancePx();
+    const mediciones = distPx ? await ocrReadMeasurements() : [];
+
+    let escalaCaliper = null;
+    let matchedLabel = null;
+    if (distPx && mediciones.length){
+      let best = null;
+      for (const [label, mmValue] of mediciones){
+        const candidateScale = mmValue / distPx;
+        const error = escalaRegla ? Math.abs(candidateScale - escalaRegla) / escalaRegla : 0;
+        if (!best || error < best.error){
+          best = {error, label, mmValue, candidateScale};
+        }
+      }
+      if (best){
+        matchedLabel = best.label;
+        escalaCaliper = best.candidateScale;
+      }
+    }
+
+    let escala = null, metodo = 'fallido', confianza = 'baja';
+    if (escalaRegla){
+      escala = escalaRegla;
+      metodo = 'regla';
+      confianza = 'alta';
+      if (escalaCaliper){
+        const errorRel = Math.abs(escalaRegla - escalaCaliper) / escalaRegla;
+        metodo = 'regla+caliper_ocr';
+        if (errorRel > 0.05) confianza = 'media';
+      }
+    } else if (escalaCaliper){
+      escala = escalaCaliper;
+      metodo = 'caliper_ocr';
+      confianza = 'media';
+    }
+
+    return { escala, metodo, confianza, distPx, mediciones, matchedLabel };
+  }
+
   document.getElementById('autoDetectBtn').addEventListener('click', async ()=>{
     const statusEl = document.getElementById('autoDetectStatus');
     const btn = document.getElementById('autoDetectBtn');
     btn.disabled = true;
-    statusEl.textContent = 'Analizando regla de profundidad…';
+    statusEl.textContent = 'Analizando regla y caliper…';
 
-    const escala = detectRulerScale();
+    const r = await autoCalibrate();
 
-    if (escala){
-      currentScaleMmPx = escala;
-      scaleReadout.textContent = `${escala.toFixed(4)} mm/px`;
-      scaleReadoutPx.textContent = `≈ ${(1/escala).toFixed(2)} px/mm (auto, regla)`;
+    if (r.escala){
+      currentScaleMmPx = r.escala;
+      scaleReadout.textContent = `${r.escala.toFixed(4)} mm/px`;
+      scaleReadoutPx.textContent = `≈ ${(1/r.escala).toFixed(2)} px/mm — método: ${r.metodo}, confianza: ${r.confianza}`;
       saveBtn.disabled = false;
-      statusEl.textContent = '✓ Regla detectada. Leyendo profundidad y transductor…';
+      statusEl.textContent = '✓ Escala detectada. Leyendo profundidad y transductor…';
 
       try {
         const meta = await ocrMetadata();
         if (meta.profundidad_cm) document.getElementById('profundidad').value = meta.profundidad_cm;
         if (meta.transductor) document.getElementById('transductor').value = meta.transductor;
-        statusEl.textContent = '✓ Detección automática completa. Revisa los campos y guarda.';
+        statusEl.textContent = `✓ Detección completa (${r.metodo}, confianza ${r.confianza}). Revisa y guarda.`;
       } catch(e){
         statusEl.textContent = '✓ Escala detectada (no se pudo leer el texto del panel, complétalo a mano).';
       }
     } else {
-      statusEl.textContent = '✗ No se detectó la regla en esta imagen. Marca los 2 puntos manualmente arriba.';
+      statusEl.textContent = '✗ No se detectó regla ni caliper en esta imagen. Marca los 2 puntos manualmente arriba.';
     }
 
     btn.disabled = false;
