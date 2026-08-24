@@ -7,6 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 <script src="config.js"></script>
 <style>
   :root{
@@ -236,6 +237,11 @@
       </div>
     </div>
 
+    <div id="autoDetectRow" style="display:none; margin-top:12px;">
+      <button class="primary" id="autoDetectBtn" style="background:var(--green);">🔍 Detectar automáticamente</button>
+      <div id="autoDetectStatus" style="margin-top:8px; font-family:'IBM Plex Mono', monospace; font-size:12px; color:var(--muted);"></div>
+    </div>
+
     <div class="points-status">
       <span><span class="swatch y"></span> P1: <span class="val" id="p1Val">—</span></span>
       <span><span class="swatch g"></span> P2: <span class="val" id="p2Val">—</span></span>
@@ -363,6 +369,8 @@
         dropzoneLabel.style.display = 'none';
         canvasWrap.style.display = 'block';
         dropzone.classList.add('has-image');
+        document.getElementById('autoDetectRow').style.display = 'block';
+        document.getElementById('autoDetectStatus').textContent = '';
         points = [];
         drawScene();
         updatePointsStatus();
@@ -578,6 +586,137 @@
       (p.transductor||'').toLowerCase().includes(q)
     );
     renderProfiles(filtered);
+  });
+
+  // ---------- Detección automática (puerto de auto_calibrate.py a JS) ----------
+  // Mismo layout genérico que usa la versión Python: la regla de
+  // profundidad suele caer en esta franja relativa del ancho de imagen.
+  const RULER_X_FRAC = [0.158, 0.194];
+  const BRIGHTNESS_THRESH = 150;
+
+  function detectRulerScale(){
+    if (!naturalW) return null;
+    const x0 = Math.floor(RULER_X_FRAC[0] * naturalW);
+    const x1 = Math.floor(RULER_X_FRAC[1] * naturalW);
+    const bandW = x1 - x0;
+    if (bandW <= 0) return null;
+
+    const imgData = ctx.getImageData(x0, 0, bandW, naturalH).data;
+    const rowsBright = [];
+    for (let y = 0; y < naturalH; y++){
+      let count = 0;
+      for (let x = 0; x < bandW; x++){
+        const idx = (y * bandW + x) * 4;
+        const lum = (imgData[idx] + imgData[idx+1] + imgData[idx+2]) / 3;
+        if (lum > BRIGHTNESS_THRESH) count++;
+      }
+      rowsBright.push(count);
+    }
+
+    const tickRows = [];
+    for (let y = 0; y < naturalH; y++){
+      if (rowsBright[y] > 5) tickRows.push(y);
+    }
+    if (tickRows.length < 4) return null;
+
+    // agrupa filas consecutivas en clusters, igual que la versión Python
+    const rawClusters = [];
+    let cur = [tickRows[0]];
+    for (let i = 1; i < tickRows.length; i++){
+      if (tickRows[i] - cur[cur.length-1] <= 3){
+        cur.push(tickRows[i]);
+      } else {
+        rawClusters.push(cur);
+        cur = [tickRows[i]];
+      }
+    }
+    rawClusters.push(cur);
+
+    // se queda solo con clusters del tamaño "típico" (descarta el glifo
+    // de texto de la etiqueta "5", que tiene otro grosor)
+    const sizes = rawClusters.map(c => c.length);
+    const sizeCounts = {};
+    sizes.forEach(s => sizeCounts[s] = (sizeCounts[s]||0)+1);
+    let modeSize = sizes[0], modeCount = 0;
+    for (const s in sizeCounts){
+      if (sizeCounts[s] > modeCount){ modeCount = sizeCounts[s]; modeSize = parseInt(s); }
+    }
+    const cleanClusters = rawClusters
+      .filter(c => c.length === modeSize)
+      .map(c => c.reduce((a,b)=>a+b,0) / c.length);
+
+    if (cleanClusters.length < 3) return null;
+
+    const diffs = [];
+    for (let i = 1; i < cleanClusters.length; i++) diffs.push(cleanClusters[i] - cleanClusters[i-1]);
+    const sorted = [...diffs].sort((a,b)=>a-b);
+    const median = sorted[Math.floor(sorted.length/2)];
+    const goodDiffs = diffs.filter(d => Math.abs(d - median) < median * 0.1);
+    if (goodDiffs.length < 2) return null;
+
+    const pxPerCm = goodDiffs.reduce((a,b)=>a+b,0) / goodDiffs.length;
+    return 10.0 / pxPerCm; // mm/px
+  }
+
+  async function ocrMetadata(){
+    // recorta el panel técnico (profundidad "D") y el header (transductor)
+    // y les corre OCR -- mismas regiones relativas que la versión Python
+    const cropCanvas = (fx0, fy0, fx1, fy1, scale=3) => {
+      const cw = Math.floor((fx1-fx0)*naturalW), ch = Math.floor((fy1-fy0)*naturalH);
+      const c = document.createElement('canvas');
+      c.width = cw*scale; c.height = ch*scale;
+      const cctx = c.getContext('2d');
+      cctx.imageSmoothingEnabled = false;
+      cctx.drawImage(canvas, fx0*naturalW, fy0*naturalH, cw, ch, 0, 0, cw*scale, ch*scale);
+      return c;
+    };
+
+    const panelCanvas = cropCanvas(0, 0.09, 0.13, 0.35);
+    const headerCanvas = cropCanvas(0, 0, 1, 0.08, 2);
+
+    const worker = await Tesseract.createWorker('eng');
+    const { data: { text: panelText } } = await worker.recognize(panelCanvas);
+    const { data: { text: headerText } } = await worker.recognize(headerCanvas);
+    await worker.terminate();
+
+    const meta = {};
+    const dMatch = panelText.match(/\bD\s+([\d.]+)/);
+    if (dMatch) meta.profundidad_cm = parseFloat(dMatch[1]);
+
+    const probeMatch = headerText.match(/\b(\d[A-Za-z]\d|\w\d-\d)\b/);
+    if (probeMatch) meta.transductor = probeMatch[1];
+
+    return meta;
+  }
+
+  document.getElementById('autoDetectBtn').addEventListener('click', async ()=>{
+    const statusEl = document.getElementById('autoDetectStatus');
+    const btn = document.getElementById('autoDetectBtn');
+    btn.disabled = true;
+    statusEl.textContent = 'Analizando regla de profundidad…';
+
+    const escala = detectRulerScale();
+
+    if (escala){
+      currentScaleMmPx = escala;
+      scaleReadout.textContent = `${escala.toFixed(4)} mm/px`;
+      scaleReadoutPx.textContent = `≈ ${(1/escala).toFixed(2)} px/mm (auto, regla)`;
+      saveBtn.disabled = false;
+      statusEl.textContent = '✓ Regla detectada. Leyendo profundidad y transductor…';
+
+      try {
+        const meta = await ocrMetadata();
+        if (meta.profundidad_cm) document.getElementById('profundidad').value = meta.profundidad_cm;
+        if (meta.transductor) document.getElementById('transductor').value = meta.transductor;
+        statusEl.textContent = '✓ Detección automática completa. Revisa los campos y guarda.';
+      } catch(e){
+        statusEl.textContent = '✓ Escala detectada (no se pudo leer el texto del panel, complétalo a mano).';
+      }
+    } else {
+      statusEl.textContent = '✗ No se detectó la regla en esta imagen. Marca los 2 puntos manualmente arriba.';
+    }
+
+    btn.disabled = false;
   });
 
   loadProfiles();
